@@ -1,6 +1,6 @@
 name: Kryptomantix Agent
 
-"on":
+on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
@@ -8,6 +8,9 @@ name: Kryptomantix Agent
 jobs:
   run-agent:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Даем права на запись в репозиторий, чтобы сохранять память
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,8 +31,10 @@ jobs:
           YANDEX_FOLDER_ID: ${{ secrets.YANDEX_FOLDER_ID }}
         run: python agent.py
 
-      - name: Save state
-        uses: actions/cache@v3
-        with:
-          path: agent_state.json
-          key: vk-agent-state
+      # Вот тут мы сохраняем память прямо в репозиторий
+      - name: Commit state file
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add agent_state.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update agent state [skip ci]" && git push)
