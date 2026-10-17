@@ -1,1 +1,36 @@
+name: Kryptomantix Agent
 
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Запуск каждые 15 минут
+  workflow_dispatch:        # Кнопка для ручного запуска
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run agent
+        env:
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          YANDEX_API_KEY: ${{ secrets.YANDEX_API_KEY }}
+          YANDEX_FOLDER_ID: ${{ secrets.YANDEX_FOLDER_ID }}
+        run: python agent.py
+
+      # Сохраняем память агента (чтобы не постил одно и то же)
+      - name: Save state
+        uses: actions/cache@v3
+        with:
+          path: agent_state.json
+          key: vk-agent-state
