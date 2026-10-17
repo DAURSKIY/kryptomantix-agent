@@ -114,8 +114,13 @@ def analyze_pool(pool):
     vol_liq_ratio = vol_24h / liquidity if liquidity > 0 else 0
     if vol_liq_ratio < MIN_VOL_LIQ_RATIO or vol_liq_ratio > MAX_VOL_LIQ_RATIO: return None
 
+    # Извлекаем адрес самого токена (нужен для сканера)
+    base_token_id = pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id")
+    token_address = base_token_id.split("_")[-1] if base_token_id else pool_address
+
     return {
         "name": name, "address": pool_address, "network": network,
+        "token_address": token_address,
         "liquidity": liquidity, "vol_24h": vol_24h, 
         "age_hours": age_hours, "ratio": vol_liq_ratio
     }
@@ -145,9 +150,11 @@ def main():
         print(f"🧠 Генерирую вердикт для {cand['name']}...")
         ai_text = get_ai_verdict(cand)
 
+        # Обрати внимание на строчку "📜 Адрес контракта"
         text = f"""👀 Заметили активность по токену {cand['name']}
 
 🌐 Сеть: {cand['network']}
+📜 Адрес контракта: {cand['token_address']}
 💧 Ликвидность: ${cand['liquidity']:,.0f}
 📊 Объём за 24ч: ${cand['vol_24h']:,.0f}
 ⏳ Возраст: {cand['age_hours']:.1f} часов
@@ -155,7 +162,8 @@ def main():
 
 🤖 Мнение AI: {ai_text}
 
-🔗 Полный разбор в нашем сканере: kryptomantix.streamlit.app
+🔗 Вставь этот адрес в наш сканер для полного разбора:
+kryptomantix.streamlit.app
 
 ⚠️ Не ИИР (не инвестиционная рекомендация). DYOR."""
 
