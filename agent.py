@@ -4,7 +4,6 @@ import json
 import time
 from datetime import datetime, timezone
 
-# Берем токены из переменных окружения (в GitHub они будут в секретах)
 VK_TOKEN = os.environ.get("VK_TOKEN")
 VK_GROUP_ID_STR = os.environ.get("VK_GROUP_ID")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
@@ -21,7 +20,10 @@ MIN_AGE_HOURS = 6
 MAX_AGE_HOURS = 168
 MIN_VOL_LIQ_RATIO = 0.3
 MAX_VOL_LIQ_RATIO = 10.0
-MAX_POSTS_PER_DAY = 3
+
+# Мы разрешаем боту делать 1 пост за 15-минутный запуск, 
+# чтобы ВК не банил его за спам. За день он сам наберет нужное количество.
+MAX_POSTS_PER_DAY = 5 
 
 STATE_FILE = "agent_state.json"
 
@@ -129,37 +131,36 @@ def main():
     candidates.sort(key=lambda x: x["liquidity"], reverse=True)
     print(f"🎯 Найдено кандидатов: {len(candidates)}")
 
-    posted_count = 0
-    for cand in candidates:
-        if state["posted_today"] >= MAX_POSTS_PER_DAY: break
+    # Берем ТОЛЬКО ПЕРВЫЙ токен из списка (самый лучший)
+    if candidates:
+        cand = candidates[0]
         print(f"🧠 Генерирую AI-вердикт для {cand['name']}...")
         ai_text = get_ai_verdict(cand)
-        text = f"""🔍 Найден токен с потенциалом
+        
+        # Сделал текст чуть более живым, чтобы ВК не банил
+        text = f"""👀 Заметили активность по токену {cand['name']}
 
-Токен: {cand['name']}
-Сеть: Solana
-Ликвидность: ${cand['liquidity']:,.0f}
-Объём 24ч: ${cand['vol_24h']:,.0f}
-Возраст: {cand['age_hours']:.1f} часов
-Объём/ликвидность: {cand['ratio']:.2f}x
+Что по цифрам:
+💧 Ликвидность: ${cand['liquidity']:,.0f}
+📊 Объём за 24ч: ${cand['vol_24h']:,.0f}
+⏳ Возраст: {cand['age_hours']:.1f} часов
 
-🤖 Вердикт AI:
-{ai_text}
+🤖 Мнение AI: {ai_text}
 
-Проверить полный отчет в сканере: https://kryptomantix.streamlit.app
+🔗 Полный разбор в нашем сканере: kryptomantix.streamlit.app
 
-⚠️ Не инвестиционная рекомендация. DYOR."""
+⚠️ Не ИИР (не инвестиционная рекомендация). DYOR."""
+
         print(f"📝 Постим: {cand['name']}")
         if post_to_vk(text):
             state["posted_today"] += 1
             if "posted_addresses" not in state: state["posted_addresses"] = []
             state["posted_addresses"].append(cand["address"])
             save_state(state)
-            posted_count += 1
-            time.sleep(3)
+            print("✅ Успешно. Ждем следующего запуска.")
 
     save_state(state)
-    print(f"✅ Работа завершена. Опубликовано: {posted_count}")
+    print(f"✅ Работа завершена.")
 
 if __name__ == "__main__":
     main()
