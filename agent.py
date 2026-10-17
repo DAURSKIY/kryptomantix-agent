@@ -3,6 +3,7 @@ import requests
 import json
 import time
 from datetime import datetime, timezone
+import mimetypes
 
 VK_TOKEN = os.environ.get("VK_TOKEN")
 VK_GROUP_ID_STR = os.environ.get("VK_GROUP_ID")
@@ -15,22 +16,22 @@ except ValueError:
     VK_GROUP_ID = None
 
 MIN_LIQUIDITY = 30000
-MAX_LIQUIDITY = 5000000 # Увеличил для крупных сетей
+MAX_LIQUIDITY = 5000000 
 MIN_AGE_HOURS = 6
 MAX_AGE_HOURS = 168
 MIN_VOL_LIQ_RATIO = 0.3
 MAX_VOL_LIQ_RATIO = 10.0
-
 MAX_POSTS_PER_DAY = 5 
 STATE_FILE = "agent_state.json"
+
+DEFAULT_IMAGE = "https://raw.githubusercontent.com/DAURSKIY/kryptomantix/main/favicon.png"
 
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
-            pass
+        except: pass
     return {"posted_today": 0, "last_date": "", "posted_addresses": []}
 
 def save_state(state):
@@ -38,24 +39,34 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def upload_photo_to_vk(image_url):
-    """Скачивает картинку и загружает её на сервера ВК, возвращает ID для attachments"""
-    if not image_url:
-        return None
+    if not image_url: return None
     try:
-        # 1. Получаем адрес сервера для загрузки
+        print(f"⬇️ Скачиваю картинку: {image_url[:50]}...")
+        img_resp = requests.get(image_url, timeout=15)
+        img_data = img_resp.content
+        
+        # Определяем формат файла (png, jpg и т.д.)
+        content_type = img_resp.headers.get('Content-Type', 'image/jpeg')
+        ext = mimetypes.guess_extension(content_type) or '.jpg'
+        if ext == '.jpe': ext = '.jpg'
+
+        print("⬆️ Запрашиваю сервер для загрузки в ВК...")
         url = f"https://api.vk.com/method/photos.getWallUploadServer?group_id={abs(VK_GROUP_ID)}&access_token={VK_TOKEN}&v=5.199"
         r = requests.get(url, timeout=10).json()
-        if "error" in r: return None
+        if "error" in r: 
+            print(f"❌ VK (getWallUploadServer): {r['error']['error_msg']}")
+            return None
         upload_url = r["response"]["upload_url"]
 
-        # 2. Скачиваем картинку токена
-        img_data = requests.get(image_url, timeout=10).content
+        print("⬆️ Отправляю картинку на сервер ВК...")
+        files = {'photo': (f'image{ext}', img_data, content_type)}
+        r_upload = requests.post(upload_url, files=files, timeout=20).json()
 
-        # 3. Отправляем на ВК
-        files = {'photo': ('image.jpg', img_data)}
-        r_upload = requests.post(upload_url, files=files, timeout=15).json()
+        if "photo" not in r_upload or r_upload["photo"] == "[]":
+            print(f"❌ VK не принял файл: {r_upload}")
+            return None
 
-        # 4. Сохраняем и получаем ID
+        print("💾 Сохраняю картинку на стене...")
         params = {
             "group_id": abs(VK_GROUP_ID),
             "photo": r_upload["photo"],
@@ -68,17 +79,22 @@ def upload_photo_to_vk(image_url):
         
         if "response" in r_save:
             p = r_save["response"][0]
-            return f"photo{p['owner_id']}_{p['id']}"
+            photo_id = f"photo{p['owner_id']}_{p['id']}"
+            print(f"✅ Картинка готова! ID: {photo_id}")
+            return photo_id
+        else:
+            print(f"❌ VK (saveWallPhoto): {r_save.get('error', {}).get('error_msg')}")
+            
     except Exception as e:
-        print(f"⚠️ Ошибка загрузки фото: {e}")
+        print(f"❌ Ошибка при работе с фото: {e}")
     return None
 
 def get_ai_verdict(cand):
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         return "AI-анализ недоступен."
-    prompt_text = f"""Ты — опытный криптоаналитик. Напиши краткий вердикт (2-3 предложения) для поста.
+    prompt_text = f"""Ты — опытный криптоаналитик. Напиши краткий вердикт (2-3 предложения).
     Токен: {cand['name']} в сети {cand['network']}. Ликвидность ${cand['liquidity']:,.0f}, Объём 24ч ${cand['vol_24h']:,.0f}, Возраст {cand['age_hours']:.1f} ч, Объём/Ликв {cand['ratio']:.2f}x.
-    Оцени потенциал. Если объём/ликв > 8x — упомяни накрутку. Если возраст < 24ч — предупреди о риске. Пиши только на русском, без воды."""
+    Оцени потенциал. Пиши только на русском, без воды."""
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {"Content-Type": "application/json", "Authorization": f"Api-Key {YANDEX_API_KEY}"}
     body = {
@@ -91,7 +107,6 @@ def get_ai_verdict(cand):
         response.raise_for_status()
         return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
     except Exception as e:
-        print(f"⚠️ Ошибка AI: {e}")
         return "AI-анализ временно недоступен."
 
 def post_to_vk(message, photo_id=None):
@@ -115,17 +130,9 @@ def post_to_vk(message, photo_id=None):
     return False
 
 def fetch_new_pools():
-    # Список сетей: ID для GeckoTerminal и красивое название
-    networks = [
-        ("solana", "Solana"), 
-        ("eth", "Ethereum"), 
-        ("bsc", "BSC"), 
-        ("base", "Base")
-    ]
+    networks = [("solana", "Solana"), ("eth", "Ethereum"), ("bsc", "BSC"), ("base", "Base")]
     all_pools = []
-    
     for net_id, net_name in networks:
-        print(f"🔍 Ищу трендовые токены на {net_name}...")
         url = f"https://api.geckoterminal.com/api/v2/networks/{net_id}/trending_pools?page=1"
         try:
             r = requests.get(url, headers={"Accept": "application/json"}, timeout=15)
@@ -133,12 +140,11 @@ def fetch_new_pools():
             pools = r.json().get("data", [])
             for p in pools:
                 if p.get("attributes", {}).get("reserve_in_usd"):
-                    p["network_name"] = net_name # Запоминаем сеть
+                    p["network_name"] = net_name
                     all_pools.append(p)
-            time.sleep(1) # Пауза, чтобы GeckoTerminal не забанил
-        except Exception as e:
-            print(f"❌ Ошибка {net_name}: {e}")
-            
+            time.sleep(1)
+        except Exception:
+            pass
     return all_pools
 
 def analyze_pool(pool):
@@ -165,7 +171,6 @@ def analyze_pool(pool):
     vol_liq_ratio = vol_24h / liquidity if liquidity > 0 else 0
     if vol_liq_ratio < MIN_VOL_LIQ_RATIO or vol_liq_ratio > MAX_VOL_LIQ_RATIO: return None
 
-    # Пытаемся достать адрес токена (не пула) для получения картинки
     base_token_id = pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id")
     token_address = base_token_id.split("_")[-1] if base_token_id else None
 
@@ -177,30 +182,24 @@ def analyze_pool(pool):
     }
 
 def get_token_image(token_address):
-    """Ищет логотип токена через DexScreener"""
-    if not token_address: return None
+    if not token_address: return DEFAULT_IMAGE
     try:
         r = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{token_address}", timeout=10).json()
         pairs = r.get("pairs")
         if pairs and len(pairs) > 0:
-            return pairs[0].get("info", {}).get("imageUrl")
-    except:
-        pass
-    return None
+            img = pairs[0].get("info", {}).get("imageUrl")
+            if img: return img
+    except: pass
+    return DEFAULT_IMAGE
 
 def main():
-    print("=" * 50)
-    print(f"🤖 Мультичейн Агент запущен: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    if not VK_TOKEN or not VK_GROUP_ID:
-        print("❌ ОШИБКА: Нет VK_TOKEN или VK_GROUP_ID.")
-        return
-
+    print(f"🤖 Агент запущен: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     state = load_state()
+    
     today = datetime.now().strftime("%Y-%m-%d")
     if state.get("last_date") != today:
         state["last_date"] = today
         state["posted_today"] = 0
-        print("📅 Новый день. Счетчик сброшен.")
 
     if state["posted_today"] >= MAX_POSTS_PER_DAY:
         print("🛑 Лимит постов на сегодня исчерпан.")
@@ -211,21 +210,16 @@ def main():
     candidates = [c for c in candidates if c and c["address"] not in state.get("posted_addresses", [])]
     candidates.sort(key=lambda x: x["liquidity"], reverse=True)
     
-    print(f"🎯 Найдено кандидатов во всех сетях: {len(candidates)}")
+    print(f"🎯 Найдено кандидатов: {len(candidates)}")
 
     if candidates:
         cand = candidates[0]
-        print(f"🧠 Генерирую AI-вердикт для {cand['name']} ({cand['network']})...")
+        print(f"🧠 Генерирую вердикт для {cand['name']}...")
         ai_text = get_ai_verdict(cand)
         
-        # Ищем картинку
-        photo_id = None
         img_url = get_token_image(cand.get("token_address"))
-        if img_url:
-            print("🖼️ Найдена картинка, загружаю в ВК...")
-            photo_id = upload_photo_to_vk(img_url)
+        photo_id = upload_photo_to_vk(img_url)
 
-        # Текст поста
         text = f"""👀 Заметили активность по токену {cand['name']}
 
 🌐 Сеть: {cand['network']}
@@ -240,16 +234,12 @@ def main():
 
 ⚠️ Не ИИР (не инвестиционная рекомендация). DYOR."""
 
-        print(f"📝 Постим: {cand['name']}")
         if post_to_vk(text, photo_id):
             state["posted_today"] += 1
-            if "posted_addresses" not in state: state["posted_addresses"] = []
             state["posted_addresses"].append(cand["address"])
             save_state(state)
-            print("✅ Успешно. Ждем следующего запуска.")
 
     save_state(state)
-    print(f"✅ Работа завершена.")
 
 if __name__ == "__main__":
     main()
