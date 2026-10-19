@@ -4,9 +4,6 @@ import json
 import time
 from datetime import datetime, timezone
 
-# ==========================================
-# НАСТРОЙКИ
-# ==========================================
 VK_TOKEN = os.environ.get("VK_TOKEN")
 VK_GROUP_ID_STR = os.environ.get("VK_GROUP_ID")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
@@ -17,15 +14,13 @@ try:
 except ValueError:
     VK_GROUP_ID = None
 
-# Фильтры
 MIN_LIQUIDITY = 30000
 MAX_LIQUIDITY = 5000000 
 MIN_AGE_HOURS = 6
 MAX_AGE_HOURS = 168
 MIN_VOL_LIQ_RATIO = 0.3
 MAX_VOL_LIQ_RATIO = 10.0
-
-# Лимит постов, чтобы ВК не забанил за спам
+MAX_FDV_LIQ_RATIO = 1000 # Защита от скамов с раздутым FDV
 MAX_POSTS_PER_DAY = 5 
 STATE_FILE = "agent_state.json"
 
@@ -34,43 +29,40 @@ def load_state():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
-            pass
+        except: pass
     return {"posted_today": 0, "last_date": "", "posted_addresses": []}
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-# ==========================================
-# AI-ВЕРДИКТ (Исправлен, чтобы не противоречить)
-# ==========================================
 def get_ai_verdict(cand):
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         return "AI-анализ недоступен."
     
-    prompt_text = f"""Ты — опытный криптоаналитик. Токен уже прошел фильтры и получил статус ГЕМ.
-    Твоя задача — написать краткий вердикт (2-3 предложения) для поста.
+    # Теперь мы не навязываем ИИ статус "ГЕМ", а просим оценить объективно
+    prompt_text = f"""Ты — опытный криптоаналитик. Оцени токен на основе метрик и напиши краткий вердикт (2-3 предложения).
     
     Метрики токена: 
     - Название: {cand['name']} в сети {cand['network']}
-    - Ликвидность: ${cand['liquidity']:,.0f} (для мемкоинов это ХОРОШАЯ ликвидность)
+    - Ликвидность: ${cand['liquidity']:,.0f}
     - Объём 24ч: ${cand['vol_24h']:,.0f} 
+    - FDV: ${cand['fdv']:,.0f}
     - Возраст: {cand['age_hours']:.1f} ч
     - Соотношение объём/ликвидность: {cand['ratio']:.2f}x
     
     Правила:
     1. Пиши только на русском, без воды.
-    2. Подтверди статус ГЕМ и укажи на потенциал роста.
-    3. Если возраст < 24ч — предупреди о риске (это молодой токен).
+    2. Если ликвидность низкая (меньше $50k) — предупреди об опасности.
+    3. Если возраст < 24ч — предупреди, что это молодой токен.
     4. Если соотношение объём/ликв > 8x — упомяни накрутку.
-    5. Сделай акцент на том, что ликвидность достаточная и объемы здоровые."""
+    5. Будь объективен."""
     
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {"Content-Type": "application/json", "Authorization": f"Api-Key {YANDEX_API_KEY}"}
     body = {
         "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
-        "completionOptions": {"stream": False, "temperature": 0.2, "maxTokens": "300"},
+        "completionOptions": {"stream": False, "temperature": 0.3, "maxTokens": "300"},
         "messages": [{"role": "user", "text": prompt_text}]
     }
     try:
@@ -80,15 +72,9 @@ def get_ai_verdict(cand):
     except Exception as e:
         return "AI-анализ временно недоступен."
 
-# ==========================================
-# ПУБЛИКАЦИЯ В ВК
-# ==========================================
 def post_to_vk(message):
     url = "https://api.vk.com/method/wall.post"
-    params = {
-        "owner_id": VK_GROUP_ID, "from_group": 1, 
-        "message": message, "access_token": VK_TOKEN, "v": "5.199"
-    }
+    params = {"owner_id": VK_GROUP_ID, "from_group": 1, "message": message, "access_token": VK_TOKEN, "v": "5.199"}
     try:
         r = requests.post(url, data=params, timeout=15).json()
         if "response" in r:
@@ -100,9 +86,6 @@ def post_to_vk(message):
         print(f"❌ Ошибка: {e}")
     return False
 
-# ==========================================
-# ПОИСК И АНАЛИЗ ТОКЕНОВ
-# ==========================================
 def fetch_new_pools():
     networks = [("solana", "Solana"), ("eth", "Ethereum"), ("bsc", "BSC"), ("base", "Base")]
     all_pools = []
@@ -116,9 +99,8 @@ def fetch_new_pools():
                 if p.get("attributes", {}).get("reserve_in_usd"):
                     p["network_name"] = net_name
                     all_pools.append(p)
-            time.sleep(1) # Пауза, чтобы не забанили API
-        except Exception:
-            pass
+            time.sleep(1)
+        except Exception: pass
     return all_pools
 
 def analyze_pool(pool):
@@ -131,6 +113,7 @@ def analyze_pool(pool):
     try:
         liquidity = float(attributes.get("reserve_in_usd", 0) or 0)
         vol_24h = float(attributes.get("volume_usd", {}).get("h24", 0) or 0)
+        fdv = float(attributes.get("fdv_usd", 0) or 0)
     except: return None
 
     if not created_at_str: return None
@@ -139,36 +122,36 @@ def analyze_pool(pool):
         age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
     except: return None
 
-    # Применяем фильтры
     if age_hours < MIN_AGE_HOURS or age_hours > MAX_AGE_HOURS: return None
     if liquidity < MIN_LIQUIDITY or liquidity > MAX_LIQUIDITY: return None
     
     vol_liq_ratio = vol_24h / liquidity if liquidity > 0 else 0
     if vol_liq_ratio < MIN_VOL_LIQ_RATIO or vol_liq_ratio > MAX_VOL_LIQ_RATIO: return None
 
-    # Достаем адрес самого токена для сканера
+    # НОВЫЙ ФИЛЬТР: Отсекаем токены с раздутым FDV
+    if liquidity > 0 and fdv > 0:
+        fdv_liq_ratio = fdv / liquidity
+        if fdv_liq_ratio > MAX_FDV_LIQ_RATIO:
+            return None # Пропускаем этот токен
+
     base_token_id = pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id")
     token_address = base_token_id.split("_")[-1] if base_token_id else pool_address
 
     return {
         "name": name, "address": pool_address, "network": network,
-        "token_address": token_address,
+        "token_address": token_address, "fdv": fdv,
         "liquidity": liquidity, "vol_24h": vol_24h, 
         "age_hours": age_hours, "ratio": vol_liq_ratio
     }
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
 def main():
     print(f"🤖 Агент запущен: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     state = load_state()
-    
     today = datetime.now().strftime("%Y-%m-%d")
+    
     if state.get("last_date") != today:
         state["last_date"] = today
         state["posted_today"] = 0
-        print("📅 Новый день. Счетчик постов сброшен.")
 
     if state["posted_today"] >= MAX_POSTS_PER_DAY:
         print("🛑 Лимит постов на сегодня исчерпан.")
@@ -176,17 +159,14 @@ def main():
 
     pools = fetch_new_pools()
     candidates = [analyze_pool(p) for p in pools]
-    
-    # Исключаем те, что уже постили
     candidates = [c for c in candidates if c and c["address"] not in state.get("posted_addresses", [])]
     candidates.sort(key=lambda x: x["liquidity"], reverse=True)
     
-    print(f"🎯 Найдено новых кандидатов: {len(candidates)}")
+    print(f"🎯 Найдено кандидатов: {len(candidates)}")
 
-    # Постим только одного (самого лучшего)
     if candidates:
         cand = candidates[0]
-        print(f"🧠 Генерирую вердикт для {cand['name']} ({cand['network']})...")
+        print(f"🧠 Генерирую вердикт для {cand['name']}...")
         ai_text = get_ai_verdict(cand)
 
         text = f"""👀 Заметили активность по токену {cand['name']}
@@ -205,7 +185,6 @@ kryptomantix.streamlit.app
 
 ⚠️ Не ИИР (не инвестиционная рекомендация). DYOR."""
 
-        print(f"📝 Постим: {cand['name']}")
         if post_to_vk(text):
             state["posted_today"] += 1
             state["posted_addresses"].append(cand["address"])
@@ -213,7 +192,6 @@ kryptomantix.streamlit.app
             print("✅ Успешно. Ждем следующего запуска.")
 
     save_state(state)
-    print("✅ Работа завершена.")
 
 if __name__ == "__main__":
     main()
