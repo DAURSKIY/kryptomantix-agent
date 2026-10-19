@@ -17,6 +17,9 @@ try:
 except ValueError:
     VK_GROUP_ID = None
 
+# ID твоего закрытого чата
+VK_CHAT_PEER_ID = 2000000001
+
 # Фильтры
 MIN_LIQUIDITY = 30000
 MAX_LIQUIDITY = 5000000 
@@ -24,8 +27,12 @@ MIN_AGE_HOURS = 6
 MAX_AGE_HOURS = 168
 MIN_VOL_LIQ_RATIO = 0.3
 MAX_VOL_LIQ_RATIO = 10.0
-MAX_FDV_LIQ_RATIO = 1000 # Защита от скамов с раздутым FDV
-MAX_POSTS_PER_DAY = 5 
+MAX_FDV_LIQ_RATIO = 1000 
+
+# Лимиты: 1 пост на стену и 4 в чат (всего 5 за день)
+MAX_WALL_POSTS = 1
+MAX_CHAT_POSTS = 4
+
 STATE_FILE = "agent_state.json"
 
 def load_state():
@@ -34,35 +41,23 @@ def load_state():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except: pass
-    return {"posted_today": 0, "last_date": "", "posted_addresses": []}
+    # Обновленный формат состояния
+    return {"wall_posts_today": 0, "chat_posts_today": 0, "last_date": "", "posted_addresses": []}
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 # ==========================================
-# AI-ВЕРДИКТ (Объективный)
+# AI-ВЕРДИКТ
 # ==========================================
 def get_ai_verdict(cand):
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         return "AI-анализ недоступен."
     
     prompt_text = f"""Ты — опытный криптоаналитик. Оцени токен на основе метрик и напиши краткий вердикт (2-3 предложения).
-    
-    Метрики токена: 
-    - Название: {cand['name']} в сети {cand['network']}
-    - Ликвидность: ${cand['liquidity']:,.0f}
-    - Объём 24ч: ${cand['vol_24h']:,.0f} 
-    - FDV: ${cand['fdv']:,.0f}
-    - Возраст: {cand['age_hours']:.1f} ч
-    - Соотношение объём/ликвидность: {cand['ratio']:.2f}x
-    
-    Правила:
-    1. Пиши только на русском, без воды.
-    2. Если ликвидность низкая (меньше $50k) — предупреди об опасности.
-    3. Если возраст < 24ч — предупреди, что это молодой токен.
-    4. Если соотношение объём/ликв > 8x — упомяни накрутку.
-    5. Будь объективен."""
+    Метрики: Название: {cand['name']} в сети {cand['network']}, Ликвидность: ${cand['liquidity']:,.0f}, Объём 24ч: ${cand['vol_24h']:,.0f}, FDV: ${cand['fdv']:,.0f}, Возраст: {cand['age_hours']:.1f} ч, Объём/Ликв: {cand['ratio']:.2f}x.
+    Правила: Пиши только на русском, без воды. Оцени риски и потенциал."""
     
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {"Content-Type": "application/json", "Authorization": f"Api-Key {YANDEX_API_KEY}"}
@@ -75,31 +70,48 @@ def get_ai_verdict(cand):
         response = requests.post(url, headers=headers, json=body, timeout=30)
         response.raise_for_status()
         return response.json()["result"]["alternatives"][0]["message"]["text"].strip()
-    except Exception as e:
+    except Exception:
         return "AI-анализ временно недоступен."
 
 # ==========================================
-# ПУБЛИКАЦИЯ В ВК
+# ОТПРАВКА
 # ==========================================
-def post_to_vk(message):
+def post_to_wall(message):
     url = "https://api.vk.com/method/wall.post"
+    params = {"owner_id": VK_GROUP_ID, "from_group": 1, "message": message, "access_token": VK_TOKEN, "v": "5.199"}
+    try:
+        r = requests.post(url, data=params, timeout=15).json()
+        if "response" in r:
+            print(f"✅ Пост на СТЕНУ опубликован! ID: {r['response']['post_id']}")
+            return True
+        else:
+            print(f"❌ Ошибка VK (стена): {r.get('error', {}).get('error_msg')}")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+    return False
+
+def send_to_chat(message, peer_id):
+    url = "https://api.vk.com/method/messages.send"
     params = {
-        "owner_id": VK_GROUP_ID, "from_group": 1, 
-        "message": message, "access_token": VK_TOKEN, "v": "5.199"
+        "peer_id": peer_id, 
+        "message": message, 
+        "random_id": int(time.time() * 1000), # Обязательный параметр для ВК
+        "access_token": VK_TOKEN, 
+        "v": "5.199"
     }
     try:
         r = requests.post(url, data=params, timeout=15).json()
         if "response" in r:
-            print(f"✅ Пост опубликован! ID: {r['response']['post_id']}")
+            print(f"✅ Сообщение в ЧАТ отправлено! ID: {r['response']}")
             return True
         else:
-            print(f"❌ Ошибка VK: {r.get('error', {}).get('error_msg')}")
+            print(f"❌ Ошибка VK (чат): {r.get('error', {}).get('error_msg')}")
     except Exception as e:
         print(f"❌ Ошибка: {e}")
     return False
 
 # ==========================================
-# ПОИСК ТОКЕНОВ
+# ПОИСК
 # ==========================================
 def fetch_new_pools():
     networks = [("solana", "Solana"), ("eth", "Ethereum"), ("bsc", "BSC"), ("base", "Base")]
@@ -143,10 +155,8 @@ def analyze_pool(pool):
     vol_liq_ratio = vol_24h / liquidity if liquidity > 0 else 0
     if vol_liq_ratio < MIN_VOL_LIQ_RATIO or vol_liq_ratio > MAX_VOL_LIQ_RATIO: return None
 
-    # Отсекаем токены с раздутым FDV (защита от KTI)
     if liquidity > 0 and fdv > 0:
-        if (fdv / liquidity) > MAX_FDV_LIQ_RATIO:
-            return None 
+        if (fdv / liquidity) > MAX_FDV_LIQ_RATIO: return None 
 
     base_token_id = pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id")
     token_address = base_token_id.split("_")[-1] if base_token_id else pool_address
@@ -168,11 +178,12 @@ def main():
     
     if state.get("last_date") != today:
         state["last_date"] = today
-        state["posted_today"] = 0
-        print("📅 Новый день. Счетчик сброшен.")
+        state["wall_posts_today"] = 0
+        state["chat_posts_today"] = 0
+        print("📅 Новый день. Счетчики сброшены.")
 
-    if state["posted_today"] >= MAX_POSTS_PER_DAY:
-        print("🛑 Лимит постов на сегодня исчерпан.")
+    if state["wall_posts_today"] >= MAX_WALL_POSTS and state["chat_posts_today"] >= MAX_CHAT_POSTS:
+        print("🛑 Лимиты постов на сегодня исчерпаны.")
         return
 
     pools = fetch_new_pools()
@@ -187,34 +198,38 @@ def main():
         print(f"🧠 Генерирую вердикт для {cand['name']} ({cand['network']})...")
         ai_text = get_ai_verdict(cand)
 
-        # Текст с призывом к комментариям
-        text = f"""👀 Заметили активность по токену {cand['name']}
+        base_text = f"""👀 Активность по токену {cand['name']}
 
 🌐 Сеть: {cand['network']}
-📜 Адрес контракта: {cand['token_address']}
+📜 Контракт: {cand['token_address']}
 💧 Ликвидность: ${cand['liquidity']:,.0f}
-📊 Объём за 24ч: ${cand['vol_24h']:,.0f}
-⏳ Возраст: {cand['age_hours']:.1f} часов
+📊 Объём 24ч: ${cand['vol_24h']:,.0f}
+⏳ Возраст: {cand['age_hours']:.1f} ч
 ⚖️ Объём/Ликв: {cand['ratio']:.2f}x
 
-🤖 Мнение AI: {ai_text}
+🤖 AI: {ai_text}
+"""
+        
+        link_text = "\n🔗 Проверить в сканере: kryptomantix.streamlit.app\n\n⚠️ Не ИИР. DYOR."
 
-🔗 Вставь этот адрес в наш сканер для полного разбора:
-kryptomantix.streamlit.app
-
-👇 Как думаете, это гем или скам? Пишите в комментариях!
-
-⚠️ Не ИИР (не инвестиционная рекомендация). DYOR."""
-
-        print(f"📝 Постим: {cand['name']}")
-        if post_to_vk(text):
-            state["posted_today"] += 1
-            state["posted_addresses"].append(cand["address"])
-            save_state(state)
-            print("✅ Успешно. Ждем следующего запуска.")
+        # Логика: Если на стене еще не постили, постим туда. Если уже постили, шлем в чат.
+        if state["wall_posts_today"] < MAX_WALL_POSTS:
+            wall_text = base_text + "\n👇 Как думаете, это гем или скам? Пишите в комментариях!" + link_text
+            print(f"📝 Постим на СТЕНУ: {cand['name']}")
+            if post_to_wall(wall_text):
+                state["wall_posts_today"] += 1
+                state["posted_addresses"].append(cand["address"])
+                save_state(state)
+        
+        elif state["chat_posts_today"] < MAX_CHAT_POSTS:
+            chat_text = base_text + "\n💎 Эксклюзивный алерт для VK Donut" + link_text
+            print(f"📝 Отправляем в VIP-ЧАТ: {cand['name']}")
+            if send_to_chat(chat_text, VK_CHAT_PEER_ID):
+                state["chat_posts_today"] += 1
+                state["posted_addresses"].append(cand["address"])
+                save_state(state)
 
     save_state(state)
-    print("✅ Работа завершена.")
 
 if __name__ == "__main__":
     main()
