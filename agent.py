@@ -4,6 +4,9 @@ import json
 import time
 from datetime import datetime, timezone
 
+# ==========================================
+# НАСТРОЙКИ
+# ==========================================
 VK_TOKEN = os.environ.get("VK_TOKEN")
 VK_GROUP_ID_STR = os.environ.get("VK_GROUP_ID")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
@@ -14,6 +17,7 @@ try:
 except ValueError:
     VK_GROUP_ID = None
 
+# Фильтры
 MIN_LIQUIDITY = 30000
 MAX_LIQUIDITY = 5000000 
 MIN_AGE_HOURS = 6
@@ -36,11 +40,13 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+# ==========================================
+# AI-ВЕРДИКТ (Объективный)
+# ==========================================
 def get_ai_verdict(cand):
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         return "AI-анализ недоступен."
     
-    # Теперь мы не навязываем ИИ статус "ГЕМ", а просим оценить объективно
     prompt_text = f"""Ты — опытный криптоаналитик. Оцени токен на основе метрик и напиши краткий вердикт (2-3 предложения).
     
     Метрики токена: 
@@ -72,9 +78,15 @@ def get_ai_verdict(cand):
     except Exception as e:
         return "AI-анализ временно недоступен."
 
+# ==========================================
+# ПУБЛИКАЦИЯ В ВК
+# ==========================================
 def post_to_vk(message):
     url = "https://api.vk.com/method/wall.post"
-    params = {"owner_id": VK_GROUP_ID, "from_group": 1, "message": message, "access_token": VK_TOKEN, "v": "5.199"}
+    params = {
+        "owner_id": VK_GROUP_ID, "from_group": 1, 
+        "message": message, "access_token": VK_TOKEN, "v": "5.199"
+    }
     try:
         r = requests.post(url, data=params, timeout=15).json()
         if "response" in r:
@@ -86,6 +98,9 @@ def post_to_vk(message):
         print(f"❌ Ошибка: {e}")
     return False
 
+# ==========================================
+# ПОИСК ТОКЕНОВ
+# ==========================================
 def fetch_new_pools():
     networks = [("solana", "Solana"), ("eth", "Ethereum"), ("bsc", "BSC"), ("base", "Base")]
     all_pools = []
@@ -128,11 +143,10 @@ def analyze_pool(pool):
     vol_liq_ratio = vol_24h / liquidity if liquidity > 0 else 0
     if vol_liq_ratio < MIN_VOL_LIQ_RATIO or vol_liq_ratio > MAX_VOL_LIQ_RATIO: return None
 
-    # НОВЫЙ ФИЛЬТР: Отсекаем токены с раздутым FDV
+    # Отсекаем токены с раздутым FDV (защита от KTI)
     if liquidity > 0 and fdv > 0:
-        fdv_liq_ratio = fdv / liquidity
-        if fdv_liq_ratio > MAX_FDV_LIQ_RATIO:
-            return None # Пропускаем этот токен
+        if (fdv / liquidity) > MAX_FDV_LIQ_RATIO:
+            return None 
 
     base_token_id = pool.get("relationships", {}).get("base_token", {}).get("data", {}).get("id")
     token_address = base_token_id.split("_")[-1] if base_token_id else pool_address
@@ -144,6 +158,9 @@ def analyze_pool(pool):
         "age_hours": age_hours, "ratio": vol_liq_ratio
     }
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 def main():
     print(f"🤖 Агент запущен: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     state = load_state()
@@ -152,6 +169,7 @@ def main():
     if state.get("last_date") != today:
         state["last_date"] = today
         state["posted_today"] = 0
+        print("📅 Новый день. Счетчик сброшен.")
 
     if state["posted_today"] >= MAX_POSTS_PER_DAY:
         print("🛑 Лимит постов на сегодня исчерпан.")
@@ -166,9 +184,10 @@ def main():
 
     if candidates:
         cand = candidates[0]
-        print(f"🧠 Генерирую вердикт для {cand['name']}...")
+        print(f"🧠 Генерирую вердикт для {cand['name']} ({cand['network']})...")
         ai_text = get_ai_verdict(cand)
 
+        # Текст с призывом к комментариям
         text = f"""👀 Заметили активность по токену {cand['name']}
 
 🌐 Сеть: {cand['network']}
@@ -183,8 +202,11 @@ def main():
 🔗 Вставь этот адрес в наш сканер для полного разбора:
 kryptomantix.streamlit.app
 
+👇 Как думаете, это гем или скам? Пишите в комментариях!
+
 ⚠️ Не ИИР (не инвестиционная рекомендация). DYOR."""
 
+        print(f"📝 Постим: {cand['name']}")
         if post_to_vk(text):
             state["posted_today"] += 1
             state["posted_addresses"].append(cand["address"])
@@ -192,6 +214,7 @@ kryptomantix.streamlit.app
             print("✅ Успешно. Ждем следующего запуска.")
 
     save_state(state)
+    print("✅ Работа завершена.")
 
 if __name__ == "__main__":
     main()
