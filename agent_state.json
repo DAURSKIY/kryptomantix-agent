@@ -1,6 +1,6 @@
 {
   "wall_posts_today": 1,
-  "chat_posts_today": 1,
+  "chat_posts_today": 2,
   "last_date": "2026-10-26",
   "posted_addresses": [
     "0xc19d91d99afc0332e5013a569c9721cd9ecb51a14c851f7a189a140950a627fa",
@@ -9,6 +9,7 @@
     "0x0bd5ded695d61c2db15c703c345d57e039fd0b6d",
     "6KGbV6LxuATyk32jUaRuujgW63jmEJLezgyUxMqFWER7",
     "0xc85d5cb72d1aad6f152a8decad228ae4a59ac9b3",
-    "6DNxwecbtdNNstpB5tdnxZsfGe3HmsNgEUZhdue4b1PH"
+    "6DNxwecbtdNNstpB5tdnxZsfGe3HmsNgEUZhdue4b1PH",
+    "0x0f21a72a02dc78217c2987826d061500aecf7707"
   ]
 }
